@@ -1,0 +1,295 @@
+{
+  "meta": {
+    "version": "2025-10-05",
+    "owner": "UserNanni",
+    "objective": "RAG híbrido (semântico + sintático) com camada de grafo",
+    "source_refs": [
+      "https://github.com/microsoft/graphrag",
+      "https://microsoft.github.io/graphrag/",
+      "https://www.microsoft.com/en-us/research/project/graphrag/",
+      "https://supabase.com/docs/guides/ai/hybrid-search",
+      "https://supabase.com/docs/guides/database/full-text-search",
+      "https://supabase.com/docs/guides/database/extensions/pgvector",
+      "https://supabase.com/blog/increase-performance-pgvector-hnsw",
+      "https://github.com/docling-project/docling",
+      "https://docling-project.github.io/docling/"
+    ]
+  },
+  "improvements_applied": [
+    "Busca híbrida em Postgres com RRF (FTS + vetorial) e pesos ajustáveis",
+    "Index HNSW em pgvector para alto desempenho",
+    "Integração GraphRAG com modos Global, Local e DRIFT, além de LazyGraphRAG",
+    "Reranker opcional (Cohere/Jina/Voyage) após o híbrido",
+    "Docling com chunking híbrido e preservação de estrutura (tabelas/figuras/código)",
+    "OCR automático via RapidOCR quando necessário (PDFs escaneados/imagens)",
+    "Embeddings multilíngues por padrão e normalização vetorial",
+    "Proveniência/citações com offsets, páginas e IDs de chunk",
+    "Avaliação contínua (Ragas + BenchmarkQED) e observabilidade (Langfuse/OTel)",
+    "Cache de embeddings/LLM (Redis) e rate limiting/retries",
+    "Controles de custo (top_k, limites de tokens, thresholds) e fallback local",
+    "RLS/PII redaction e logs de consulta"
+  ],
+  "architecture": {
+    "flow": [
+      "Ingestão (Docling -> Markdown/JSON + metadados)",
+      "OCR condicional (RapidOCR) quando necessário",
+      "Chunking híbrido guiado por estrutura",
+      "Embeddings + FTS + armazenamento Supabase",
+      "Indexação GraphRAG (entidades, relações, comunidades, summaries)",
+      "Consulta: híbrido (RRF) + reranker + GraphRAG (DRIFT/global/local)",
+      "Geração (Gemini para custo/latência) com citações",
+      "Telemetria + avaliação + cache"
+    ],
+    "modes": {
+      "graph_first": "usar GraphRAG (DRIFT/global/local) e complementar com híbrido",
+      "hybrid_first": "usar híbrido (FTS+vetor) e, se necessário, ativar GraphRAG",
+      "auto_select": "heurística baseada em intenção do usuário (global vs local)"
+    }
+  },
+  "components": {
+    "ingestion": {
+      "docling": {
+        "pipeline": "default-heron",
+        "export_formats": ["markdown", "json", "doctags"],
+        "preserve": ["tables", "figures", "captions", "code", "equations"],
+        "chunking": {
+          "strategy": "hybrid",
+          "by_structure": true,
+          "target_tokens": 500,
+          "overlap_tokens": 80,
+          "split_on_headings": true,
+          "keep_tables_intact": true,
+          "attach_captions": true
+        },
+        "ocr": {
+          "enabled": "auto",
+          "backend": "rapidocr",
+          "lang_detect": "auto",
+          "force_full_page_ocr": false
+        }
+      },
+      "pii_redaction": {
+        "enabled": false,
+        "provider": "presidio",
+        "mask_strategy": "entity_label"
+      }
+    },
+    "embeddings": {
+      "default_model": "bge-m3",
+      "alternatives": [
+        {
+          "name": "text-embedding-3-large",
+          "dims": 3072,
+          "provider": "openai"
+        },
+        { "name": "text-embedding-004", "dims": 768, "provider": "google" },
+        { "name": "voyage-multilingual-2", "dims": 1024, "provider": "voyage" }
+      ],
+      "dims": 1024,
+      "normalize": true,
+      "batch_size": 64,
+      "cache": { "enabled": true, "store": "redis", "ttl_seconds": 2592000 }
+    },
+    "storage": {
+      "supabase": {
+        "schema": "public",
+        "tables": {
+          "documents": { "has_fts": true, "has_embedding": true },
+          "chunks": {
+            "has_fts": true,
+            "has_embedding": true,
+            "provenance": true
+          },
+          "graph_nodes": {},
+          "graph_edges": {},
+          "community_summaries": {},
+          "citations": {},
+          "query_logs": {},
+          "eval_runs": {}
+        },
+        "indexes": {
+          "fts": "GIN",
+          "vector": "HNSW",
+          "filter_columns": ["doc_type", "lang", "created_at"]
+        },
+        "rls": true
+      }
+    },
+    "graph": {
+      "graphrag": {
+        "modes": ["global", "local", "drift", "basic"],
+        "lazy_graphrag": true,
+        "auto_tuning": true,
+        "community_summaries": true,
+        "entity_relation_extraction": "LLM+NLP",
+        "prompt_tuning": "domain_specific",
+        "storage_ref": "supabase"
+      }
+    },
+    "retrieval": {
+      "hybrid": {
+        "fusion": "RRF",
+        "weights": { "full_text_weight": 1.2, "semantic_weight": 1.0 },
+        "rrf_k": 50,
+        "match_count": 20,
+        "thresholds": { "min_semantic_sim": 0.75 }
+      },
+      "reranker": {
+        "enabled": true,
+        "provider": "cohere-rerank-v3",
+        "alternatives": ["jina-reranker-v2", "voyage-rerank-2"],
+        "top_n": 8
+      },
+      "filters": {
+        "lang": ["pt-br"],
+        "doc_type": ["pdf", "html", "docx"],
+        "time_range_days": null
+      },
+      "graph_selection": {
+        "auto": {
+          "use_global": "queries com intenção holística",
+          "use_drift": "queries locais com contexto de comunidade",
+          "use_local": "entidades específicas",
+          "fallback": "basic (vetorial)"
+        }
+      }
+    },
+    "generation": {
+      "llm": {
+        "primary": { "provider": "google", "model": "gemini-2.0-flash" },
+        "fallback": {
+          "provider": "local",
+          "model": "llama-3.1-8b-instruct-q4"
+        },
+        "max_context_tokens": 24000,
+        "max_output_tokens": 1200,
+        "temperature": 0.2
+      },
+      "prompting": {
+        "style": "instruções com JSON schema para citações",
+        "guardrails": ["cite_source_ids", "refuse_without_evidence"]
+      },
+      "citations": {
+        "include_offsets": true,
+        "include_page": true,
+        "exact_spans": true
+      }
+    },
+    "evaluation": {
+      "frameworks": ["ragas", "benchmarkqed"],
+      "metrics": [
+        "faithfulness",
+        "answer_relevancy",
+        "context_precision",
+        "context_recall",
+        "factual_consistency"
+      ],
+      "schedules": { "on_deploy": true, "nightly_sample": 0.05 }
+    },
+    "observability": {
+      "tracing": ["langfuse", "opentelemetry"],
+      "log_payloads": false,
+      "pii_safe_logs": true,
+      "dashboards": [
+        "throughput",
+        "latency",
+        "hit_rate",
+        "rerank_gain",
+        "graph_usage"
+      ]
+    },
+    "resilience_cost": {
+      "rate_limits": { "tpm": 200000, "rpm": 5000 },
+      "retries": { "max": 3, "backoff": "exponential" },
+      "budget_per_query_usd": 0.01
+    }
+  },
+  "supabase_sql": {
+    "enable_extensions": [
+      "create extension if not exists vector with schema extensions;",
+      "create extension if not exists pg_trgm;",
+      "create extension if not exists pgcrypto;"
+    ],
+    "tables": [
+      "create table if not exists documents ( id bigserial primary key, source_url text, filename text, lang text, doc_type text, created_at timestamptz default now(), content text, fts tsvector generated always as (to_tsvector('simple', coalesce(content,''))) stored, embedding vector(1024) );",
+      "create table if not exists chunks ( id bigserial primary key, document_id bigint references documents(id) on delete cascade, chunk_index int, content text, page_num int, char_start int, char_end int, lang text, headings text[], is_table bool default false, is_code bool default false, fts tsvector generated always as (to_tsvector('simple', coalesce(content,''))) stored, embedding vector(1024) );",
+      "create table if not exists citations ( id bigserial primary key, answer_id uuid, chunk_id bigint references chunks(id) on delete cascade, page_num int, char_start int, char_end int, confidence numeric );",
+      "create table if not exists graph_nodes ( id bigserial primary key, document_id bigint references documents(id) on delete cascade, node_type text, label text, properties jsonb );",
+      "create table if not exists graph_edges ( id bigserial primary key, source_id bigint references graph_nodes(id) on delete cascade, target_id bigint references graph_nodes(id) on delete cascade, relation text, weight numeric, properties jsonb );",
+      "create table if not exists community_summaries ( id bigserial primary key, level int, community_id text, summary text, tokens int, metadata jsonb );",
+      "create table if not exists query_logs ( id bigserial primary key, qtext text, used_modes text[], filters jsonb, retrieved_ids bigint[], reranked_ids bigint[], answer_id uuid, latency_ms int, created_at timestamptz default now() );",
+      "create table if not exists eval_runs ( id uuid default gen_random_uuid() primary key, name text, created_at timestamptz default now(), metrics jsonb );"
+    ],
+    "indexes": [
+      "create index if not exists idx_documents_fts on documents using gin(fts);",
+      "create index if not exists idx_chunks_fts on chunks using gin(fts);",
+      "create index if not exists idx_documents_vec on documents using hnsw (embedding vector_cosine_ops);",
+      "create index if not exists idx_chunks_vec on chunks using hnsw (embedding vector_cosine_ops);",
+      "create index if not exists idx_chunks_docid on chunks(document_id);",
+      "create index if not exists idx_citations_chunk on citations(chunk_id);"
+    ],
+    "functions": {
+      "hybrid_search_chunks": "create or replace function hybrid_search_chunks( query_text text, query_embedding vector(1024), match_count int, full_text_weight float = 1.2, semantic_weight float = 1.0, rrf_k int = 50, lang_filter text = null, doc_type_filter text = null ) returns setof chunks language sql as $$ with full_text as (   select id, row_number() over(order by ts_rank_cd(fts, websearch_to_tsquery('simple', query_text)) desc) as rank_ix   from chunks   where fts @@ websearch_to_tsquery('simple', query_text)     and (lang_filter is null or lang = lang_filter)     and (doc_type_filter is null or (select d.doc_type from documents d where d.id = chunks.document_id) = doc_type_filter)   order by rank_ix   limit least(match_count, 30) * 2 ), semantic as (   select id, row_number() over(order by embedding <=> query_embedding) as rank_ix   from chunks   where (lang_filter is null or lang = lang_filter)     and (doc_type_filter is null or (select d.doc_type from documents d where d.id = chunks.document_id) = doc_type_filter)   order by rank_ix   limit least(match_count, 30) * 2 ) select c.* from full_text ft full outer join semantic se on ft.id = se.id join chunks c on coalesce(ft.id, se.id) = c.id order by coalesce(1.0 / (rrf_k + ft.rank_ix), 0.0) * full_text_weight + coalesce(1.0 / (rrf_k + se.rank_ix), 0.0) * semantic_weight desc limit least(match_count, 30) $$;"
+    },
+    "rls": {
+      "enable": [
+        "alter table documents enable row level security;",
+        "alter table chunks enable row level security;"
+      ],
+      "policies_note": "Definir políticas conforme sua autenticação/tenant."
+    }
+  },
+  "workflows": {
+    "ingest": [
+      "Docling converte PDF/DOCX/PPTX em Markdown+JSON, preservando estrutura",
+      "OCR RapidOCR quando documento não é pesquisável",
+      "Chunking híbrido e enriquecimento de metadados (página, cabeçalhos, flags)",
+      "Embeddings normalizados e inserção em documents/chunks (Supabase)",
+      "GraphRAG: extração entidades/relações, comunidades (Leiden) e summaries",
+      "Criação de índices (GIN/HNSW) e validação"
+    ],
+    "query": [
+      "Classificar intenção (global vs local) e idioma",
+      "Executar híbrido (hybrid_search_chunks) com filtros e pesos",
+      "Rerank opcional (top_n) sobre os candidatos",
+      "Se global/local complexa: acionar GraphRAG (DRIFT/global/local) e mesclar contexto",
+      "Gerar resposta com Gemini, com citações (chunk_id, página, offsets)",
+      "Log + avaliação amostral (Ragas/BenchmarkQED) + cache"
+    ]
+  },
+  "defaults": {
+    "params": {
+      "hybrid_match_count": 20,
+      "reranker_top_n": 8,
+      "graphrag_mode": "auto",
+      "semantic_threshold": 0.75,
+      "max_context_tokens": 18000,
+      "answer_style": "conciso_com_citacoes"
+    },
+    "filters": {
+      "lang": ["pt", "en"],
+      "doc_type": null,
+      "time_range_days": null
+    }
+  },
+  "testing_evaluation": {
+    "golden_set_size": 200,
+    "ragas_metrics": [
+      "faithfulness",
+      "answer_relevancy",
+      "context_precision",
+      "context_recall"
+    ],
+    "benchmarkqed": {
+      "enabled": true,
+      "notes": "ver Project GraphRAG/BenchmarkQED"
+    },
+    "acceptance_thresholds": { "faithfulness": 0.85, "answer_relevancy": 0.8 }
+  },
+  "security_compliance": {
+    "rls": true,
+    "pii_redaction_before_embed": false,
+    "sensitive_doc_tags": ["confidential", "pii"],
+    "mask_in_logs": true
+  }
+}

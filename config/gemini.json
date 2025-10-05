@@ -1,0 +1,12 @@
+{
+  "llm": {
+    "primary": { "provider": "google", "model": "gemini-2.0-flash" },
+    "fallback": { "provider": "local", "model": "llama-3.1-8b-instruct-q4" },
+    "max_context_tokens": 24000,
+    "max_output_tokens": 1200,
+    "temperature": 0.2
+  },
+  "prompting": {
+    "guardrails": ["cite_source_ids", "refuse_without_evidence"]
+  }
+}
