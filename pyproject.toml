@@ -1,0 +1,12 @@
+[project]
+name = "iefa-rag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [ 
+    "docling",
+  "docling.core",
+  "numpy",
+  "redis"
+  ]

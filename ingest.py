@@ -1,9 +1,9 @@
 # ingest_example.py
 import os
 from typing import List, Dict, Any
-from ocr import parse_doc
-from embedding import get_embedding
-from db import upsert_document, insert_chunk
+from src.ocr import parse_doc
+from src.embedding import get_embedding
+from src.db import upsert_document, insert_chunk
 
 def ingest_file(path: str, lang: str = "pt", doc_type: str = "pdf", source_url: str = None):
     md, dj, chunks = parse_doc(path)
