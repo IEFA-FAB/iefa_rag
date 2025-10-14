@@ -1,0 +1,6 @@
+onlyBuiltDependencies:
+  - canvas
+  - es5-ext
+  - esbuild
+  - sharp
+  - tree-sitter
