@@ -7,12 +7,15 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
+# Importe do módulo onde você colou o código acima
 from app.build_retrievers import get_hybrid_retriever
 
-LLM_MODEL = "meta/llama3-70b-instruct"
+# Recomendo usar um slug válido da NVIDIA, como:
+LLM_MODEL = os.getenv("LLM_MODEL", "meta/llama-3.1-70b-instruct")
 
 def build_chain():
-    retriever = get_hybrid_retriever(k_sem=4, k_bm25=6, weights=(0.55, 0.45))
+    # USE_FTS controla se será FTS+Semântico ou BM25+Semântico
+    retriever = get_hybrid_retriever(k_sem=4, k_keyword=6, weights=(0.55, 0.45))
 
     prompt = ChatPromptTemplate.from_messages(
         [
