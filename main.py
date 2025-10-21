@@ -2,13 +2,22 @@ import os
 from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from rag_chain import build_chain
+from app.rag_chain import build_chain
 
 load_dotenv()
 
 app = FastAPI(title="RAG NVIDIA + Supabase (Híbrido)")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.getenv("CORS_ORIGIN", "*")],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 chain, retriever = build_chain()
 

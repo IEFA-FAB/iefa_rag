@@ -7,7 +7,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
-from build_retrievers import get_hybrid_retriever
+from app.build_retrievers import get_hybrid_retriever
 
 LLM_MODEL = "meta/llama3-70b-instruct"
 
