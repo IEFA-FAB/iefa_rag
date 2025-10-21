@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = [ 
-    "docling",
-  "docling.core",
-  "numpy",
-  "redis"
-  ]
+dependencies = [
+    "fastapi[standard]>=0.119.1",
+    "langchain>=0.3.27",
+    "langchain-community>=0.3.31",
+    "langchain-nvidia-ai-endpoints>=0.3.18",
+    "postgrest>=2.22.0",
+    "rank-bm25>=0.2.2",
+    "supabase>=2.22.0",
+]
