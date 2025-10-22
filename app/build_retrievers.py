@@ -174,14 +174,10 @@ def _coerce_metadata(meta: Any) -> Dict[str, Any]:
 # Retrievers
 # ------------------------------------------------------------------------------
 def get_semantic_retriever(k: int = 5):
-    """
-    Retriever semântico (pgvector no Supabase via seu VectorStore).
-    """
     vectorstore = get_vectorstore()
-    # MMR para diversidade
     return vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": k, "fetch_k": 50, "lambda_mult": 0.3},
+        search_type="similarity",  # <- em vez de "mmr"
+        search_kwargs={"k": k},
     )
 
 # Cache simples em memória para BM25
