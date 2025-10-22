@@ -17,4 +17,5 @@ dependencies = [
     "transformers>=4.57.1",
     "sentence-transformers>=5.1.1",
     "unidecode>=1.4.0",
+    "pytest>=8.4.2",
 ]
