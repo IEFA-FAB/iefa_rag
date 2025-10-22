@@ -19,16 +19,14 @@ except Exception:
 from pydantic import Field, ConfigDict
 
 from supabase import create_client, Client as SupabaseClient
-from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
+from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings, NVIDIARerank
 from lib.supabase_retriever import SupabaseVectorStore  # seu wrapper para pgvector
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain.retrievers.ensemble import EnsembleRetriever
+from langchain.retrievers import ContextualCompressionRetriever
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
-
-from langchain.retrievers import ContextualCompressionRetriever
-from langchain_community.document_transformers import CohereRerank
 
 # ------------------------------------------------------------------------------
 # Log
@@ -57,7 +55,7 @@ class Settings:
     EMB_MODEL: str = os.getenv("EMB_MODEL", "nvidia/nv-embedqa-e5-v5")
     CONTENT_COL: str = os.getenv("CONTENT_COL", "content")
     METADATA_COL: str = os.getenv("METADATA_COL", "metadata")
-    NVIDIA_API_KEY: Optional[str] = os.getenv("NVIDIA_API_KEY")  # requerido no runtime de embeddings
+    NVIDIA_API_KEY: Optional[str] = os.getenv("NVIDIA_API_KEY")  # requerido p/ embeddings e NIM hospedado
 
     # Ajustes de paginação para Supabase
     SUPABASE_PAGE_SIZE: int = int(os.getenv("SUPABASE_PAGE_SIZE", "1000"))
@@ -65,10 +63,12 @@ class Settings:
     # Cache do BM25 (em segundos)
     BM25_CACHE_TTL: int = int(os.getenv("BM25_CACHE_TTL", "600"))  # 10 minutos
 
-    COHERE_API_KEY: Optional[str] = os.getenv("COHERE_API_KEY")
+    # Rerank (NVIDIA)
     USE_RERANK: bool = os.getenv("USE_RERANK", "false").lower() in {"1", "true", "yes"}
     RERANK_TOP_N: int = int(os.getenv("RERANK_TOP_N", "5"))
-
+    NVIDIA_RERANK_MODEL: str = os.getenv("NVIDIA_RERANK_MODEL", "nvidia/nv-rerankqa-mistral-4b-v3")
+    # Se você estiver usando NIM self-hosted, configure o base_url (ex.: http://localhost:8000/v1)
+    NVIDIA_RERANK_BASE_URL: Optional[str] = os.getenv("NVIDIA_RERANK_BASE_URL")
 
     def validate(self) -> None:
         missing = []
@@ -79,7 +79,7 @@ class Settings:
         if missing:
             raise RuntimeError(f"Variáveis de ambiente ausentes: {', '.join(missing)}. "
                                f"Defina-as no .env ou no ambiente.")
-        # NVIDIA_API_KEY validada apenas na criação dos embeddings
+        # NVIDIA_API_KEY validada apenas na criação dos embeddings / uso do NIM
 
 SETTINGS = Settings()
 SETTINGS.validate()
@@ -170,38 +170,6 @@ def _coerce_metadata(meta: Any) -> Dict[str, Any]:
             return {"raw_metadata": meta}
     return {}
 
-def maybe_wrap_with_reranker(
-    base_retriever: BaseRetriever,
-    top_n: Optional[int] = None
-) -> BaseRetriever:
-    """
-    Se USE_RERANK estiver habilitado e houver COHERE_API_KEY, envolve o retriever base
-    com um ContextualCompressionRetriever usando Cohere Rerank.
-    Caso contrário, retorna o retriever base inalterado.
-    """
-    if not SETTINGS.USE_RERANK:
-        return base_retriever
-
-    if not SETTINGS.COHERE_API_KEY:
-        log.warning("USE_RERANK=True, mas COHERE_API_KEY não está definida. Seguindo sem rerank.")
-        return base_retriever
-
-    try:
-        compressor = CohereRerank(
-            model="rerank-3.5",
-            top_n=top_n or SETTINGS.RERANK_TOP_N,
-            cohere_api_key=SETTINGS.COHERE_API_KEY,
-        )
-        reranked = ContextualCompressionRetriever(
-            base_retriever=base_retriever,
-            document_compressor=compressor,
-        )
-        log.info(f"Rerank habilitado (Cohere Rerank, top_n={top_n or SETTINGS.RERANK_TOP_N}).")
-        return reranked
-    except Exception as e:
-        log.exception(f"Falha ao habilitar rerank: {e}. Seguindo sem rerank.")
-        return base_retriever
-
 # ------------------------------------------------------------------------------
 # Retrievers
 # ------------------------------------------------------------------------------
@@ -210,7 +178,11 @@ def get_semantic_retriever(k: int = 5):
     Retriever semântico (pgvector no Supabase via seu VectorStore).
     """
     vectorstore = get_vectorstore()
-    return vectorstore.as_retriever(search_type="mmr",search_kwargs={"k": k,"fetch_k": 50, "lambda_mult": 0.3})
+    # MMR para diversidade
+    return vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": k, "fetch_k": 50, "lambda_mult": 0.3},
+    )
 
 # Cache simples em memória para BM25
 _BM25_CACHE = {
@@ -303,17 +275,50 @@ def get_fts_retriever(k: int = 10, filters: Optional[dict] = None) -> SupabaseFT
     log.info(f"Criando FTS retriever via RPC={rpc} (k={k})")
     return SupabaseFTSRetriever(client=supabase, rpc_name=rpc, k=k, filters=filters or {})
 
+# --- Reranking NVIDIA ---------------------------------------------------------
+def maybe_wrap_with_reranker(
+    base_retriever: BaseRetriever,
+    top_n: Optional[int] = None
+) -> BaseRetriever:
+    """
+    Se USE_RERANK estiver habilitado, envolve o retriever base com um
+    ContextualCompressionRetriever usando o NVIDIARerank (NIM).
+    """
+    if not SETTINGS.USE_RERANK:
+        return base_retriever
+
+    try:
+        # Se estiver usando a oferta hospedada, apenas garanta NVIDIA_API_KEY no env.
+        # Se for NIM self-hosted, configure base_url via NVIDIA_RERANK_BASE_URL.
+        reranker = NVIDIARerank(
+            model=SETTINGS.NVIDIA_RERANK_MODEL,
+            api_key=SETTINGS.NVIDIA_API_KEY,             # também aceita nvidia_api_key=
+            base_url=SETTINGS.NVIDIA_RERANK_BASE_URL or None,
+            top_n=top_n or SETTINGS.RERANK_TOP_N,
+            truncate="END",  # evita erro se algum chunk estourar o contexto
+        )
+        wrapped = ContextualCompressionRetriever(
+            base_retriever=base_retriever,
+            document_compressor=reranker,
+        )
+        log.info(f"Rerank NVIDIA habilitado (modelo={SETTINGS.NVIDIA_RERANK_MODEL}, top_n={top_n or SETTINGS.RERANK_TOP_N}).")
+        return wrapped
+    except Exception as e:
+        log.exception(f"Falha ao habilitar rerank NVIDIA: {e}. Seguindo sem rerank.")
+        return base_retriever
+
 def get_hybrid_retriever(
     k_sem: int = 4,
     k_keyword: int = 6,
     weights: tuple[float, float] = (0.5, 0.5),
     rrf_k: int = 60,
     filters: Optional[dict] = None,
-) -> EnsembleRetriever:
+) -> BaseRetriever:
     """
     Retriever híbrido:
       - Se USE_FTS=True: FTS + Semântico
       - Caso contrário: BM25 + Semântico
+      - Opcionalmente aplica rerank com NVIDIARerank (NIM).
     """
     sem = get_semantic_retriever(k=k_sem)
     if SETTINGS.USE_FTS:
@@ -322,11 +327,13 @@ def get_hybrid_retriever(
     else:
         keyword = get_bm25_retriever(k=k_keyword)
         log.info("Híbrido: BM25 + Semântico")
+
     hybrid = EnsembleRetriever(
         retrievers=[keyword, sem],
         weights=list(weights),
         rrf_k=rrf_k,
     )
+    # Aplica rerank NVIDIA (se habilitado)
     return maybe_wrap_with_reranker(hybrid, top_n=None)
 
 # ------------------------------------------------------------------------------
@@ -334,7 +341,7 @@ def get_hybrid_retriever(
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
     query = "Qual é o procedimento descrito no documento X?"
-    # Ajuste USE_FTS=true/false no .env para alternar
+    # Ajuste USE_FTS=true/false e USE_RERANK=true/false no .env para alternar
     hybrid = get_hybrid_retriever(k_sem=4, k_keyword=6, weights=(0.5, 0.5), rrf_k=60)
     docs = hybrid.get_relevant_documents(query)
 
