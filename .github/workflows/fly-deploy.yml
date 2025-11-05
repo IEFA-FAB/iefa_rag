@@ -1,18 +1,58 @@
-# See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
-
 name: Fly Deploy
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+
 jobs:
   deploy:
     name: Deploy app
     runs-on: ubuntu-latest
-    concurrency: deploy-group    # optional: ensure only one action runs at a time
+    concurrency: deploy-group
     steps:
       - uses: actions/checkout@v4
+
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+
+      # Carrega/atualiza segredos na app do Fly.io a partir dos GitHub Secrets
+      - name: Set Fly.io secrets
+        run: |
+          flyctl secrets set \
+            SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            NVIDIA_API_KEY="${{ secrets.NVIDIA_API_KEY }}"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Deploy passando variáveis não sensíveis via --env (usa GitHub Variables)
+      - name: Deploy to Fly.io
+        run: |
+          flyctl deploy --remote-only \
+            -e SUPABASE_URL="${{ vars.SUPABASE_URL }}" \
+            -e TABLE_NAME="${{ vars.TABLE_NAME }}" \
+            -e CONTENT_COL="${{ vars.CONTENT_COL }}" \
+            -e METADATA_COL="${{ vars.METADATA_COL }}" \
+            -e QUERY_FN="${{ vars.QUERY_FN }}" \
+            -e FTS_QUERY_FN="${{ vars.FTS_QUERY_FN }}" \
+            -e USE_FTS="${{ vars.USE_FTS }}" \
+            -e EMB_MODEL="${{ vars.EMB_MODEL }}" \
+            -e USE_RERANK="${{ vars.USE_RERANK }}" \
+            -e RERANK_TOP_N="${{ vars.RERANK_TOP_N }}" \
+            -e NVIDIA_RERANK_MODEL="${{ vars.NVIDIA_RERANK_MODEL }}" \
+            -e LLM_MODEL="${{ vars.LLM_MODEL }}" \
+            -e TEMPERATURE="${{ vars.TEMPERATURE }}" \
+            -e TOP_P="${{ vars.TOP_P }}" \
+            -e MAX_TOKENS="${{ vars.MAX_TOKENS }}" \
+            -e USE_MULTI_QUERY="${{ vars.USE_MULTI_QUERY }}" \
+            -e K_SEM="${{ vars.K_SEM }}" \
+            -e K_KEYWORD="${{ vars.K_KEYWORD }}" \
+            -e WEIGHT_SEM="${{ vars.WEIGHT_SEM }}" \
+            -e WEIGHT_KEY="${{ vars.WEIGHT_KEY }}" \
+            -e RRF_K="${{ vars.RRF_K }}" \
+            -e MAX_SNIPPET_CHARS="${{ vars.MAX_SNIPPET_CHARS }}" \
+            -e TOKENIZER_NAME="${{ vars.TOKENIZER_NAME }}" \
+            -e SUPABASE_PAGE_SIZE="${{ vars.SUPABASE_PAGE_SIZE }}" \
+            -e BM25_CACHE_TTL="${{ vars.BM25_CACHE_TTL }}" \
+            -e CORS_ORIGIN="${{ vars.CORS_ORIGIN }}" \
+            -e INGEST_FOLDER="${{ vars.INGEST_FOLDER }}" \
+            -e INGEST_BATCH_SIZE="${{ vars.INGEST_BATCH_SIZE }}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
