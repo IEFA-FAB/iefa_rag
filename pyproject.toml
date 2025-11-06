@@ -8,7 +8,6 @@ dependencies = [
     "langchain>=0.3.27",
     "langchain-core>=0.3.51",
     "langchain-community>=0.3.31",
-    "langchain-nvidia-ai-endpoints>=0.3.18",
     "postgrest>=0.15.0",
     "rank-bm25>=0.2.2",
     "supabase>=2.5.1",
@@ -18,4 +17,7 @@ dependencies = [
     "sentence-transformers>=5.1.1",
     "unidecode>=1.4.0",
     "pytest>=8.4.2",
+    "openai>=2.7.1",
+    "langchain-openai>=0.3.35",
+    "requests>=2.32.5",
 ]
