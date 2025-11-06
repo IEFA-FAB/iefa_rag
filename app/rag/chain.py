@@ -17,18 +17,26 @@ from langchain_core.messages import (
 )
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain.retrievers.multi_query import MultiQueryRetriever
+
+# MultiQueryRetriever permanece no pacote principal "langchain" no v1
+from langchain_classic.retrievers.multi_query import MultiQueryRetriever
+
+# Transformadores/document transformers via "community" no v1
 from langchain_community.document_transformers import LongContextReorder
 
 from app.config import SETTINGS
 from app.retrievers.hybrid import get_hybrid_retriever
 
 
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/"
 
 
 def _resolve_api_key() -> str:
-    key = os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY") or getattr(SETTINGS, "NVIDIA_API_KEY", None)
+    key = (
+        os.getenv("NVIDIA_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or getattr(SETTINGS, "NVIDIA_API_KEY", None)
+    )
     if not key:
         raise RuntimeError("NVIDIA_API_KEY (ou OPENAI_API_KEY) não definido.")
     return key
@@ -61,15 +69,12 @@ class NvidiaChatCompletions(BaseChatModel):
             if isinstance(m, AIMessage):
                 return "assistant"
             if isinstance(m, ChatMessage):
-                # ChatMessage(role="...") já tem role
                 return m.role or "user"
             return "user"
 
         def to_content(m: BaseMessage) -> str:
-            # Conteúdos podem vir em formatos estruturados; aqui mantemos simples (texto)
             if isinstance(m.content, str):
                 return m.content
-            # Se vier como lista de partes, concatena textos disponíveis
             if isinstance(m.content, list):
                 parts = []
                 for part in m.content:
@@ -102,6 +107,7 @@ class NvidiaChatCompletions(BaseChatModel):
         if stop:
             payload["stop"] = stop
 
+        # Chat Completions (compatível com NVIDIA integrate.api)
         resp = client.chat.completions.create(**payload)
         content = (resp.choices[0].message.content or "").strip()
         generation = ChatGeneration(message=AIMessage(content=content))
@@ -139,6 +145,7 @@ def _reorder_and_prepare(inputs: dict) -> dict:
     try:
         docs = reord.transform_documents(docs)
     except Exception:
+        # Em v1 isso continua ok; apenas blindamos para casos de docs vazios
         pass
 
     context_str, citations_meta = _format_docs_with_citations(docs)
@@ -215,6 +222,7 @@ def build_chain():
 
     llm = _make_llm_main()
 
+    # LCEL v1: composição com dict + RunnableLambda + Prompt + LLM + Parser
     chain = (
         {"docs": used_retriever, "question": RunnablePassthrough()}
         | RunnableLambda(_reorder_and_prepare)

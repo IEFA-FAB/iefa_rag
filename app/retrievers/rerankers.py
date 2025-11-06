@@ -5,7 +5,7 @@ import logging
 from typing import Optional, List, Dict, Any
 
 import requests
-from langchain.retrievers import ContextualCompressionRetriever
+from langchain_classic.retrievers import ContextualCompressionRetriever
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 

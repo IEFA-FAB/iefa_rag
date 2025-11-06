@@ -2,7 +2,7 @@
 from __future__ import annotations
 import logging
 from typing import Optional
-from langchain.retrievers.ensemble import EnsembleRetriever
+from langchain_classic.retrievers.ensemble import EnsembleRetriever
 from langchain_core.retrievers import BaseRetriever
 from app.retrievers.semantic import get_semantic_retriever
 from app.retrievers.bm25 import get_bm25_retriever
