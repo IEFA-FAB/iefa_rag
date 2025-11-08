@@ -18,12 +18,22 @@ load_dotenv()
 
 app = FastAPI(title="RAG NVIDIA + Supabase (Híbrido)")
 
+ALLOWED_ORIGINS = [
+    "https://portal.iefa.com.br",
+    # ambientes de dev (se necessário):
+    "http://localhost:3000",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,          # não use "*"
+    allow_credentials=True,                 # necessário se usa cookies/credenciais
+    allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
+    allow_headers=[
+        "Content-Type", "Authorization", "Accept", "X-User-Id", "X-Requested-With"
+    ],
 )
 
 ANON_COOKIE = os.getenv("ANON_COOKIE", "anon_id")
