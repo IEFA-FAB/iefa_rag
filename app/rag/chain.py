@@ -1,4 +1,4 @@
-# app/rag/chain.py
+# app/rag/chain.py (modificado)
 from __future__ import annotations
 import os
 import re
@@ -6,8 +6,8 @@ from typing import List, Tuple, Optional, Any, Dict
 
 from openai import OpenAI
 
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import (
     BaseMessage,
@@ -29,6 +29,7 @@ from langchain_community.document_transformers import LongContextReorder
 
 from app.config import SETTINGS
 from app.retrievers.hybrid import get_hybrid_retriever
+from app.rag.memory_adapter import ChatMemory  # Importar a classe de memória
 
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1/"
@@ -295,7 +296,8 @@ def _make_llm_main() -> NvidiaChatCompletions:
     )
 
 
-def build_chain():
+# MODIFICADO: build_chain agora aceita user_id e session_id
+def build_chain(user_id: str, session_id: str):
     base_retriever = get_hybrid_retriever(
         k_sem=SETTINGS.K_SEM,
         k_keyword=SETTINGS.K_KEYWORD,
@@ -313,7 +315,7 @@ def build_chain():
             include_original=True,
         )
 
-    # Prompt mais explícito com exemplo de como citar
+    # MODIFICADO: Prompt com MessagesPlaceholder para histórico
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -331,6 +333,7 @@ def build_chain():
                     "- Não invente fatos, números ou citações."
                 ),
             ),
+            MessagesPlaceholder(variable_name="chat_history"),
             (
                 "human",
                 (
@@ -347,15 +350,95 @@ def build_chain():
     )
 
     llm = _make_llm_main()
+    memory = ChatMemory(user_id=user_id, session_id=session_id, days_to_keep=7, max_messages=200)
 
-    # LCEL v1: composição mantendo metadados para pós-processamento.
-    chain = (
-        {"docs": used_retriever, "question": RunnablePassthrough()}
-        | RunnableLambda(_reorder_and_prepare)  # -> {context, question, citations_meta}
-        | {
-            "raw_answer": (prompt | llm | StrOutputParser()),
-            "citations_meta": RunnableLambda(lambda x: x["citations_meta"]),
+    # CORREÇÃO: Simplificando a chain e garantindo que o prompt receba os dados corretamente
+    def prepare_inputs(question: str) -> Dict[str, Any]:
+        # Carrega o histórico de conversas
+        chat_history = memory.load_memory_variables({})["chat_history"]
+        return {
+            "question": question,
+            "chat_history": chat_history
         }
-        | RunnableLambda(_assemble_final_answer)  # -> {answer, references, sources}
+
+    def retrieve_and_format(inputs: Dict[str, Any]) -> Dict[str, Any]:
+        # Recupera documentos
+        docs = used_retriever.invoke(inputs["question"])
+        
+        # Reordena e formata
+        reord = LongContextReorder()
+        try:
+            docs = reord.transform_documents(docs)
+        except Exception:
+            pass
+        
+        context_str, citations_meta = _format_docs_with_citations(docs)
+        
+        return {
+            "context": context_str,
+            "question": inputs["question"],
+            "chat_history": inputs["chat_history"],
+            "citations_meta": citations_meta
+        }
+
+    # MODIFICADO: Chain com memória corrigida
+    chain = (
+        RunnableLambda(prepare_inputs)
+        | RunnableLambda(retrieve_and_format)
+        | prompt
+        | llm
+        | StrOutputParser()
     )
-    return chain, used_retriever
+
+    # Função para processar a resposta final
+    def process_final_output(inputs: Dict[str, Any], raw_answer: str) -> Dict[str, Any]:
+        # Monta a resposta final com citações
+        result = _assemble_final_answer({
+            "raw_answer": raw_answer,
+            "citations_meta": inputs["citations_meta"]
+        })
+        return result
+
+    # wrappers para salvar na memória após a execução
+    def invoke_with_memory(question: str):
+        # Prepara os inputs
+        inputs = prepare_inputs(question)
+        
+        # Recupera e formata os documentos
+        formatted_inputs = retrieve_and_format(inputs)
+        
+        # Gera a resposta
+        raw_answer = chain.invoke(question)
+        
+        # Processa a resposta final
+        result = process_final_output(formatted_inputs, raw_answer)
+        
+        # Salva na memória
+        memory.save_context({"question": question}, {"answer": result["answer"]})
+        
+        return result
+
+    async def astream_with_memory(question: str):
+        # Prepara os inputs
+        inputs = prepare_inputs(question)
+        
+        # Recupera e formata os documentos
+        formatted_inputs = retrieve_and_format(inputs)
+        
+        # Stream da resposta
+        full_answer = ""
+        async for chunk in chain.astream(question):
+            if isinstance(chunk, str):
+                full_answer += chunk
+                yield chunk
+        
+        # Processa a resposta final
+        result = process_final_output(formatted_inputs, full_answer)
+        
+        # Salva na memória
+        memory.save_context({"question": question}, {"answer": result["answer"]})
+        
+        # Envia o resultado final
+        yield result
+
+    return {"chain": chain, "invoke": invoke_with_memory, "astream": astream_with_memory, "memory": memory}
