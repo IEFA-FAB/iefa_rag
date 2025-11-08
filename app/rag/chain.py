@@ -1,4 +1,4 @@
-# app/rag/chain.py (modificado)
+# app/rag/chain.py
 from __future__ import annotations
 import os
 import re
@@ -7,7 +7,6 @@ from typing import List, Tuple, Optional, Any, Dict
 from openai import OpenAI
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import (
     BaseMessage,
@@ -135,23 +134,20 @@ class NvidiaChatCompletions(BaseChatModel):
         payload = self._payload(messages, stop)
         payload["stream"] = True
 
-        # Correção: usar o método de streaming correto
+        # SDK OpenAI-compatível (NVIDIA) retorna um iterável quando stream=True
         stream = client.chat.completions.create(**payload)
-        
+
         for event in stream:
             try:
-                # Compatível com objetos chunk do protocolo OpenAI:
                 delta = event.choices[0].delta.content if event.choices else None
             except Exception:
                 delta = None
             if delta:
                 chunk = ChatGenerationChunk(message=AIMessageChunk(content=delta))
-                # Opcional: notificar callbacks do LangChain (útil para logs/progresso)
                 if run_manager is not None:
                     try:
                         run_manager.on_llm_new_token(delta, chunk=chunk)
                     except Exception:
-                        # Evita que problemas de callback quebrem o fluxo
                         pass
                 yield chunk
 
@@ -169,7 +165,7 @@ def _format_docs_with_citations(docs: List) -> Tuple[str, List[dict]]:
         page = meta.get("page")
         rank = meta.get("rank")
         doc_id = meta.get("document_id") or meta.get("doc_id") or meta.get("id")
-        highlights = meta.get("highlights") or meta.get("highlight")  # normaliza
+        highlights = meta.get("highlights") or meta.get("highlight")
         snippet = (highlights or d.page_content or "").strip()
         if len(snippet) > SETTINGS.MAX_SNIPPET_CHARS:
             snippet = snippet[: SETTINGS.MAX_SNIPPET_CHARS] + "..."
@@ -191,20 +187,6 @@ def _format_docs_with_citations(docs: List) -> Tuple[str, List[dict]]:
 
     context_str = "\n\n".join(lines) if lines else ""
     return context_str, citations_meta
-
-
-def _reorder_and_prepare(inputs: dict) -> dict:
-    docs = inputs["docs"]
-    question = inputs["question"]
-
-    reord = LongContextReorder()
-    try:
-        docs = reord.transform_documents(docs)
-    except Exception:
-        pass
-
-    context_str, citations_meta = _format_docs_with_citations(docs)
-    return {"context": context_str, "question": question, "citations_meta": citations_meta}
 
 
 # Atualizado para reconhecer ambos os formatos: [n] e 【n】
@@ -296,8 +278,12 @@ def _make_llm_main() -> NvidiaChatCompletions:
     )
 
 
-# MODIFICADO: build_chain agora aceita user_id e session_id
 def build_chain(user_id: str, session_id: str):
+    """
+    Constrói a chain com memória por usuário/sessão.
+    Evita execução duplicada do retriever: recupera documentos UMA vez nos wrappers,
+    monta inputs para o prompt e então chama apenas prompt -> llm -> parser.
+    """
     base_retriever = get_hybrid_retriever(
         k_sem=SETTINGS.K_SEM,
         k_keyword=SETTINGS.K_KEYWORD,
@@ -315,7 +301,7 @@ def build_chain(user_id: str, session_id: str):
             include_original=True,
         )
 
-    # MODIFICADO: Prompt com MessagesPlaceholder para histórico
+    # Prompt com histórico
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -352,93 +338,57 @@ def build_chain(user_id: str, session_id: str):
     llm = _make_llm_main()
     memory = ChatMemory(user_id=user_id, session_id=session_id, days_to_keep=7, max_messages=200)
 
-    # CORREÇÃO: Simplificando a chain e garantindo que o prompt receba os dados corretamente
     def prepare_inputs(question: str) -> Dict[str, Any]:
-        # Carrega o histórico de conversas
         chat_history = memory.load_memory_variables({})["chat_history"]
-        return {
-            "question": question,
-            "chat_history": chat_history
-        }
+        return {"question": question, "chat_history": chat_history}
 
     def retrieve_and_format(inputs: Dict[str, Any]) -> Dict[str, Any]:
-        # Recupera documentos
+        # Recupera documentos uma única vez
         docs = used_retriever.invoke(inputs["question"])
-        
+
         # Reordena e formata
         reord = LongContextReorder()
         try:
             docs = reord.transform_documents(docs)
         except Exception:
             pass
-        
+
         context_str, citations_meta = _format_docs_with_citations(docs)
-        
         return {
+            **inputs,
             "context": context_str,
-            "question": inputs["question"],
-            "chat_history": inputs["chat_history"],
-            "citations_meta": citations_meta
+            "citations_meta": citations_meta,
         }
 
-    # MODIFICADO: Chain com memória corrigida
-    chain = (
-        RunnableLambda(prepare_inputs)
-        | RunnableLambda(retrieve_and_format)
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    # Core da chain: prompt -> llm -> string
+    core_chain = prompt | llm | StrOutputParser()
 
-    # Função para processar a resposta final
-    def process_final_output(inputs: Dict[str, Any], raw_answer: str) -> Dict[str, Any]:
-        # Monta a resposta final com citações
-        result = _assemble_final_answer({
-            "raw_answer": raw_answer,
-            "citations_meta": inputs["citations_meta"]
-        })
-        return result
+    def process_final_output(prepared: Dict[str, Any], raw_answer: str) -> Dict[str, Any]:
+        return _assemble_final_answer(
+            {"raw_answer": raw_answer, "citations_meta": prepared["citations_meta"]}
+        )
 
-    # wrappers para salvar na memória após a execução
+    # wrappers para salvar na memória após a execução (sem duplicar retrieval)
     def invoke_with_memory(question: str):
-        # Prepara os inputs
-        inputs = prepare_inputs(question)
-        
-        # Recupera e formata os documentos
-        formatted_inputs = retrieve_and_format(inputs)
-        
-        # Gera a resposta
-        raw_answer = chain.invoke(question)
-        
-        # Processa a resposta final
-        result = process_final_output(formatted_inputs, raw_answer)
-        
-        # Salva na memória
-        memory.save_context({"question": question}, {"answer": result["answer"]})
-        
+        prepared = retrieve_and_format(prepare_inputs(question))
+        raw_answer = core_chain.invoke(prepared)
+        result = process_final_output(prepared, raw_answer)
+        # ANTES: memory.save_context({"question": question}, {"answer": result["answer"]})
+        # AGORA: passa o result completo (answer, references, sources)
+        memory.save_context({"question": question}, result)
         return result
 
     async def astream_with_memory(question: str):
-        # Prepara os inputs
-        inputs = prepare_inputs(question)
-        
-        # Recupera e formata os documentos
-        formatted_inputs = retrieve_and_format(inputs)
-        
-        # Stream da resposta
+        prepared = retrieve_and_format(prepare_inputs(question))
         full_answer = ""
-        async for chunk in chain.astream(question):
+        async for chunk in core_chain.astream(prepared):
             if isinstance(chunk, str):
                 full_answer += chunk
                 yield chunk
-        
-        # Processa a resposta final
-        result = process_final_output(formatted_inputs, full_answer)
-        
-        # Salva na memória
-        memory.save_context({"question": question}, {"answer": result["answer"]})
-        
-        # Envia o resultado final
+        result = process_final_output(prepared, full_answer)
+        # ANTES: memory.save_context({"question": question}, {"answer": result["answer"]})
+        # AGORA: passa o result completo (answer, references, sources)
+        memory.save_context({"question": question}, result)
         yield result
 
-    return {"chain": chain, "invoke": invoke_with_memory, "astream": astream_with_memory, "memory": memory}
+    return {"invoke": invoke_with_memory, "astream": astream_with_memory, "memory": memory}
