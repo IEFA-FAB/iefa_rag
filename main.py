@@ -20,7 +20,7 @@ app = FastAPI(title="RAG NVIDIA + Supabase (Híbrido)")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("CORS_ORIGIN", "*")],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
