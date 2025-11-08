@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import json
 import uuid
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -28,8 +28,8 @@ ALLOWED_ORIGINS = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,          # não use "*"
-    allow_credentials=True,                 # necessário se usa cookies/credenciais
+    allow_origins=ALLOWED_ORIGINS,  # não use "*"
+    allow_credentials=True,         # necessário se usa cookies/credenciais
     allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
     allow_headers=[
         "Content-Type", "Authorization", "Accept", "X-User-Id", "X-Requested-With"
@@ -66,9 +66,11 @@ class AskResponse(BaseModel):
     session_id: str
 
 
+# IMPORTANTE: agora retornamos também content_json para o frontend hidratar do jeito correto
 class MessageOut(BaseModel):
     role: str
     content: str
+    content_json: Optional[Union[dict, str]] = None  # pode vir como objeto (jsonb) ou string serializada
     created_at: str
 
 
@@ -197,6 +199,8 @@ def get_session_messages(session_id: str, request: Request, response: Response, 
     """
     Restrito a usuários autenticados.
     Anônimos não podem buscar histórico.
+
+    IMPORTANTE: retorna 'content_json' além de 'content' para o frontend hidratar a UI usando o JSON do backend.
     """
     identity, is_auth = get_identity(request, response)
     if not is_auth:
@@ -208,7 +212,7 @@ def get_session_messages(session_id: str, request: Request, response: Response, 
 
     rows = (
         client.table("chat_messages")
-        .select("role, content, created_at")
+        .select("role, content, content_json, created_at")
         .eq("session_id", session_id)
         .eq("user_id", db_user_id)
         .order("created_at", desc=False)
@@ -217,6 +221,7 @@ def get_session_messages(session_id: str, request: Request, response: Response, 
         .data
         or []
     )
+    # Retorna como está; o frontend trata 'content_json' podendo ser objeto (jsonb) ou string
     return rows
 
 
